@@ -1,0 +1,96 @@
+{
+  "nodes": [
+    {
+      "label": "Audio Source",
+      "pos": [
+        43,
+        179
+      ],
+      "config": {}
+    },
+    {
+      "label": "Audio Enhancer",
+      "pos": [
+        184,
+        215
+      ],
+      "config": {
+        "enable": false
+      }
+    },
+    {
+      "label": "VAD Detector",
+      "pos": [
+        358,
+        228
+      ],
+      "config": {
+        "aggressiveness": 3
+      }
+    },
+    {
+      "label": "Speaker ID",
+      "pos": [
+        653,
+        145
+      ],
+      "config": {
+        "window": 1.5,
+        "step": 0.75
+      }
+    },
+    {
+      "label": "Whisper ASR",
+      "pos": [
+        855,
+        132
+      ],
+      "config": {
+        "model": "small"
+      }
+    },
+    {
+      "label": "LLM Summary",
+      "pos": [
+        1050,
+        100
+      ],
+      "config": {
+        "enable": true,
+        "backend": "Online"
+      }
+    }
+  ],
+  "links": [
+    {
+      "src_node_idx": 0,
+      "src_attr_idx": 0,
+      "dst_node_idx": 1,
+      "dst_attr_idx": 0
+    },
+    {
+      "src_node_idx": 1,
+      "src_attr_idx": 2,
+      "dst_node_idx": 2,
+      "dst_attr_idx": 0
+    },
+    {
+      "src_node_idx": 2,
+      "src_attr_idx": 2,
+      "dst_node_idx": 3,
+      "dst_attr_idx": 0
+    },
+    {
+      "src_node_idx": 3,
+      "src_attr_idx": 2,
+      "dst_node_idx": 4,
+      "dst_attr_idx": 1
+    },
+    {
+      "src_node_idx": 4,
+      "src_attr_idx": 3,
+      "dst_node_idx": 5,
+      "dst_attr_idx": 0
+    }
+  ]
+}
