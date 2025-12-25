@@ -1,29 +1,33 @@
-这是一个包含了**模块详细接口说明**的完整 `README.md` 更新版本。我根据您提供的最新代码（v19.0，包含 SQLite 数据库、职位管理、Markdown 生成等功能）对文档进行了全面修订。
-
----
-
-# 智能会议辅助系统 (IMA) - v19.0
+# 智能会议辅助系统 (IMA) - v20.1
 
 **Intelligent Meeting Assistant (IMA)** 是一个基于 Python 的全流程会议记录与分析系统。它集成了实时音频处理、声纹识别（带职位信息）、语音转写以及 LLM 智能总结功能，并通过可视化的 **Dear PyGui** 界面进行管理。
+
+**v20.1 更新重点**：引入了双路转写（Full Text Correction）机制，利用完整语音流修复切片导致的语义截断问题；增加了 ASR 专用降噪选项；优化了显存管理策略。
 
 ---
 
 ## ✨ 核心特性 (Key Features)
 
 1. **全流程自动化**: 从录音采集 -> 降噪 -> 声纹识别 -> 语音转写 -> 会议纪要生成，一键完成。
-2. **声纹数据库管理 (New)**:
-* 基于 **SQLite** 存储声纹特征，取代旧版的文件存储。
-* 支持录入**姓名**与**职位 (Job Title)**，生成的纪要可直接引用“产品经理 Alice 说了...”。
-* 提供专门的 **Speaker Manager** 界面，支持录音/文件导入、重命名和删除操作。
+2. **双路转写与全文校正 (New)**:
+* **Full Text Correction**: ASR 模块现在可以同时生成“分段记录”（带说话人）和“全文参考”（不分段）。LLM 会利用全文参考来修复分段记录中因切片导致的断句或丢字问题。
+* **Enhanced Audio**: ASR 模块内置可选的降噪功能，即使前置流程未开启降噪，也能确保转写输入的清晰度。
 
 
-3. **可视化管道设计 (Pipeline Designer)**: 采用节点编辑器 (Node Editor) 自由编排处理流程，支持热插拔模块（如开关降噪、切换 LLM 后端）。
-4. **智能会议纪要**:
+3. **声纹数据库管理**:
+* 基于 **SQLite** 存储声纹特征，支持录入**姓名**与**职位 (Job Title)**，生成的纪要可直接引用“产品经理 Alice 说了...”。
+* 提供专门的 **Speaker Manager** 界面，支持录音/文件导入、信息更新和删除操作。
+
+
+4. **显存优化 (New)**:
+* 实现了模型**自动卸载 (Auto-Unload)** 机制。声纹模型和 Whisper 模型在任务完成后会自动释放显存，防止多次运行导致 VRAM 溢出。
+
+
+5. **智能会议纪要**:
 * 支持 **DeepSeek (Online)** 和 **Ollama (Local)** 双后端。
-* 自动生成结构化 **Markdown 报告**，包含金色标题、高亮列表等富文本渲染。
+* 全新的 Prompt 设计，能够理解双路输入（Segmented + Full Text），生成更准确的 Markdown 报告。
 
 
-5. **双视图仪表盘**: 实时查看 **Live Transcript** (流式转写) 和渲染后的 **Meeting Minutes** (Markdown 纪要)。
 
 ---
 
@@ -35,19 +39,19 @@ IMA_System/
 │   └── default_config.json       # 默认管道连线配置
 ├── core/                         # 核心系统逻辑
 │   ├── executor.py               # 图执行引擎 (GraphExecutor)
-│   ├── processors.py             # 各个节点的具体处理逻辑 (Source, ASR, LLM等)
+│   ├── processors.py             # 节点处理逻辑 (含 ASR 双路转写逻辑)
 │   └── ui_utils.py               # UI 组件与字体管理器
 ├── resource/                     # 数据存储目录
 │   ├── raw/                      # 原始录音文件 (.wav)
-│   ├── meeting_logs/             # ASR 转写文本 (.txt)
+│   ├── meeting_logs/             # ASR 转写双路日志 (.txt)
 │   ├── meeting_summaries/        # LLM 提取的原始 JSON 数据
 │   ├── meeting_sum_md/           # 最终生成的 Markdown 报告 (.md)
 │   └── speakers.db               # SQLite 声纹数据库
 ├── utilities/                    # 算法模块
 │   ├── ASR/                      # Whisper 语音转写
 │   ├── audio_processor/          # 录音、降噪、VAD
-│   ├── diarization/              # 声纹提取与识别引擎
-│   └── meeting_extractor/        # LLM 摘要生成 (Local/Online)
+│   ├── diarization/              # 声纹提取与识别引擎 (含显存管理)
+│   └── meeting_extractor/        # LLM 摘要生成 (支持双路输入修正)
 └── main.py                       # 程序入口 (GUI)
 
 ```
@@ -98,45 +102,57 @@ IMA_System/
 
 * **路径**: `utilities/diarization/speaker_db.py`
 * **类**: `SpeakerDB`
-* **功能**: 封装 SQLite 操作与声纹模型调用，负责声纹的增删改查与特征提取。
+* **功能**: 封装 SQLite 操作与声纹模型调用，负责声纹的增删改查、特征提取及**显存管理**。
 
 | 方法 | 参数 | 描述 |
 | --- | --- | --- |
 | `add_speaker` | `name`, `title`, `audio_path` | 提取音频特征，将姓名、职位和声纹(BLOB)存入数据库。 |
-| `update_speaker_info` | `current_name`, `new_name`, `new_title` | 更新现有说话人的姓名或职位信息。 |
-| `extract_embedding_from_memory` | `audio_np` | **核心方法**。从内存数组直接提取 192维 Embedding 向量。 |
-| `match_speaker` | `input_embedding`, `threshold` | 将输入向量与数据库对比，返回 `(Name, Title)` 或 `("Unknown", "")`。 |
+| `update_speaker_info` | `current`, `new_name`, `new_title` | 更新现有说话人的姓名或职位信息。 |
+| `extract_embedding_from_memory` | `audio_np` | **核心方法**。从内存数组直接提取 192维 Embedding 向量。支持懒加载。 |
+| `unload_model` | 无 | **[New]** 主动卸载模型并执行 `gc.collect()` 和 `empty_cache()` 释放显存。 |
+| `match_speaker` | `input_embedding`, `threshold` | 将输入向量与数据库对比，返回 `(Name, Title)`。 |
 
 #### 🗣️ 识别引擎 (Speaker Engine)
 
 * **路径**: `utilities/diarization/engine.py`
 * **类**: `SpeakerEngine`
-* **功能**: 结合滑动窗口算法与 `SpeakerDB`，实现长音频的说话人切分。
+* **功能**: 结合滑动窗口算法与 `SpeakerDB`，实现长音频的说话人切分。任务结束后会自动调用 `db.unload_model()`。
 
 | 方法 | 参数 | 描述 |
 | --- | --- | --- |
-| `diarize` | `audio_np`, `window_sec`, `step_sec` | 对音频进行滑窗分析。调用 DB 的 `extract` 和 `match` 方法，返回包含 `{start, end, speaker}` 的时间轴列表。 |
+| `diarize` | `audio_np`, `window`, `step` | 对音频进行滑窗分析。调用 DB 的 `extract` 和 `match` 方法，返回包含 `{start, end, speaker}` 的时间轴列表。 |
 
 ---
 
 ### 3. 转写与摘要层 (ASR & LLM)
 
-#### 📝 语音转写 (ASR Engine)
+#### 📝 语音转写 (ASR Processor & Engine)
 
-* **路径**: `utilities/ASR/whisper_engine.py`
-* **类**: `AsyncWhisperEngine`
+* **核心逻辑**: `core/processors.py` 中的 `ASRProcessor`。
+* **引擎路径**: `utilities/ASR/whisper_engine.py`
 * **功能**: 异步多线程转写引擎，基于 OpenAI Whisper 模型。
 
-| 方法 | 参数 | 描述 |
-| --- | --- | --- |
-| `submit_task` | `audio_file_path` | 提交转写任务，返回任务 ID (非阻塞)。 |
-| `get_task_status` | `task_id` | 查询任务状态，返回 `{"status": "COMPLETED", "result": "..."}`。 |
+**ASRProcessor 新特性**:
+
+* **Full Text Correction**: 若启用，会读取原始完整录音进行第二次转写，生成不带时间戳的纯文本流，辅助 LLM 修正语义。
+* **Enhanced Audio**: 若启用，会在转写前检查音频是否已降噪，如未降噪则自动调用 `AudioEnhancer` 处理。
 
 #### 🤖 会议摘要 (Meeting Extractor)
 
 * **路径**: `utilities/meeting_extractor/meeting_extractor.py` (Local) / `_ol.py` (Online)
 * **类**: `RobustMeetingExtractor`
 * **功能**: 调用 LLM (Ollama/DeepSeek) 生成结构化会议纪要，并转换为 Markdown。
+
+**Prompt 升级**:
+现在的 Prompt 能够接受如下格式的输入：
+
+```text
+1. "Segmented Transcript": 按发言人分段的记录...
+2. "Full Text Reference": 对同一段音频的连续转写...
+
+```
+
+并指示 LLM 结合两者生成最准确的纪要。
 
 | 方法 | 参数 | 描述 |
 | --- | --- | --- |
@@ -168,5 +184,6 @@ python main.py
 
 4. **操作流程**:
 * 进入 **Speaker Manager** 录入您的声纹和职位。
+* 进入 **Pipeline Designer**，点击 Whisper ASR 节点，勾选 **Full Text Correction** 以获得最佳效果。
 * 进入 **Dashboard** 点击 Start Recording 开始会议。
 * 会议结束后，系统将自动生成 Markdown 纪要并弹窗显示。

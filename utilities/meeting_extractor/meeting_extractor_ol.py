@@ -17,7 +17,7 @@ class RobustMeetingExtractor:
     稳健会议纪要提取器 (Online版 - DeepSeek API)
     已配置为自动分类保存文件：
     - JSON -> resource/meeting_summaries
-    - MD   -> resource/meeting_sum_md  <-- [修改] 新路径
+    - MD   -> resource/meeting_sum_md
     """
     
     def __init__(self, api_key: str = "sk-578656dcadf24b72b523460eb9c8dfb3", model_name: str = "deepseek-chat"):
@@ -28,12 +28,14 @@ class RobustMeetingExtractor:
         self.api_key = api_key
         self.model_name = model_name
         
+        # 手动创建 http_client 以解决 httpx 版本兼容性报错
         try:
             custom_http_client = httpx.Client()
         except Exception as e:
             print(f"Warning: Manual httpx client creation failed ({e}), using default.")
             custom_http_client = None
 
+        # 初始化客户端
         self.client = OpenAI(
             api_key=self.api_key,
             base_url="https://api.deepseek.com",
@@ -41,32 +43,49 @@ class RobustMeetingExtractor:
         )
         
     def load_transcript(self, file_path: str) -> str:
+        """加载会议记录文件"""
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
     
     def create_successful_prompt(self, transcript: str) -> str:
-        return f"""请分析以下会议记录，提取关键信息并输出为 JSON 格式。
+        """
+        [更新] 适配 Full Text Correction 的提示词
+        指导 LLM 利用全文参考来修复分段记录中的错误
+        """
+        return f"""你是一个专业的会议秘书。我将提供一份会议记录文件，其中可能包含两个部分：
+1. "Segmented Transcript": 按发言人分段的记录，包含 [时间] 和 [姓名]。但由于切片原因，句子末尾可能不完整。
+2. "Full Text Reference" (可选): 对同一段音频的连续转写，文字内容更准确，但没有发言人信息。
 
+请结合这两部分信息（如果存在第二部分），生成一份准确的结构化会议纪要。
+请利用 "Full Text Reference" 来修复 "Segmented Transcript" 中可能存在的断句或错词，但必须保留 "Segmented Transcript" 中的发言人归属。
+
+以下是会议记录内容：
+---------------------
 {transcript}
+---------------------
 
-输出必须是严格的 JSON 格式，包含以下字段：
+输出必须严格遵守以下 JSON 结构：
 {{
-  "会议主题": "简明扼要的主题",
+  "会议主题": "主题名称",
   "参与人员": [
-    {{ "姓名": "名字", "职位": "职位(如果提到)" }}
+    {{ "姓名": "姓名", "职位": "职位(可选)" }}
   ],
   "重要决定": [
     "决定1", "决定2"
   ],
   "行动项": [
-    {{ "任务": "具体任务内容", "负责人": "谁负责", "截止时间": "时间(如果有)" }}
+    {{ "任务": "任务描述", "负责人": "负责人", "截止时间": "截止时间" }}
   ],
-  "会议总结": "一段详细的会议总结，包含背景、经过和结果。"
+  "问题与风险": [
+    "风险1", "风险2"
+  ],
+  "会议总结": "简要总结"
 }}
 
-注意：不要输出 Markdown 代码块标记，只输出纯 JSON 字符串。"""
+只输出 JSON 字符串，不要输出 Markdown 代码块标记（如 ```json），也不要任何其他解释性文字。"""
     
     def clean_response_text(self, text: str) -> str:
+        """使用正则强力提取 JSON 部分"""
         text = re.sub(r'```(?:json)?', '', text)
         text = re.sub(r'```', '', text)
         match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -75,6 +94,7 @@ class RobustMeetingExtractor:
         return text.strip()
     
     def fix_json_format(self, text: str) -> str:
+        """尝试修复常见的 JSON 格式错误"""
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1 and end > start:
@@ -91,7 +111,9 @@ class RobustMeetingExtractor:
         return text
     
     def extract_to_json(self, transcript: str) -> Dict[str, Any]:
+        """DeepSeek API 调用"""
         prompt = self.create_successful_prompt(transcript)
+        
         print(f">>> [Online] 正在调用 DeepSeek API ({self.model_name}) 分析会议记录...")
         try:
             response = self.client.chat.completions.create(
@@ -104,6 +126,7 @@ class RobustMeetingExtractor:
                 max_tokens=4000,
                 stream=False
             )
+            
             result_text = response.choices[0].message.content.strip()
             print(f"✓ 收到 API 响应，长度: {len(result_text)} 字符")
             
@@ -115,7 +138,8 @@ class RobustMeetingExtractor:
                 print("⚠️ 初次解析失败，尝试自动修复格式...")
                 fixed_text = self.fix_json_format(cleaned_text)
                 try:
-                    return json.loads(fixed_text)
+                    data = json.loads(fixed_text)
+                    return data
                 except:
                     print("⚠️ JSON 解析最终失败，切换至纯文本兜底模式")
                     return {
@@ -123,9 +147,11 @@ class RobustMeetingExtractor:
                         "会议总结": result_text,
                         "is_raw_fallback": True
                     }
+
         except Exception as e:
-            print(f"✗ DeepSeek API 调用错误: {e}")
-            return {"error": f"API请求失败: {e}"}
+            error_msg = str(e)
+            print(f"✗ DeepSeek API 调用错误: {error_msg}")
+            return {"error": f"API请求失败: {error_msg}"}
     
     def enhance_extracted_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         enhanced = data.copy()
@@ -134,7 +160,13 @@ class RobustMeetingExtractor:
         return enhanced
     
     def generate_readable_report(self, data: Dict[str, Any]) -> str:
+        """
+        生成 Markdown 格式的报告
+        适配 main.py 中的 render_markdown 函数
+        """
         report = []
+        
+        # 1. 兜底模式 (Raw Text)
         if data.get("is_raw_fallback"):
             report.append("# 会议纪要 (原始输出)")
             report.append("⚠️ 自动结构化失败，以下为原始内容：")
@@ -142,13 +174,18 @@ class RobustMeetingExtractor:
             report.append(data.get("会议总结", ""))
             return "\n".join(report)
 
+        # 2. 正常模式 (Markdown构建)
+        
+        # 标题 (H1)
         topic = data.get("会议主题", "未命名会议")
         report.append(f"# {topic}")
         
+        # 摘要 (H2)
         if "会议总结" in data:
             report.append("## 会议摘要")
             report.append(data['会议总结'])
         
+        # 参与人员 (H2)
         if "参与人员" in data and data["参与人员"]:
             report.append("## 参与人员")
             for person in data["参与人员"]:
@@ -160,11 +197,13 @@ class RobustMeetingExtractor:
                 else:
                     report.append(f"- {person}")
         
+        # 重要决定 (H3)
         if "重要决定" in data and data["重要决定"]:
             report.append("### ✅ 重要决定")
             for decision in data["重要决定"]:
                 report.append(f"- {decision}")
         
+        # 行动项 (H3)
         if "行动项" in data and data["行动项"]:
             report.append("### 📋 后续行动 (Action Items)")
             for action in data["行动项"]:
@@ -179,15 +218,23 @@ class RobustMeetingExtractor:
                 else:
                     report.append(f"- {action}")
 
+        # 问题与风险 (H3)
+        if "问题与风险" in data and data["问题与风险"]:
+            report.append("### ⚠️ 问题与风险")
+            for issue in data["问题与风险"]:
+                report.append(f"- {issue}")
+
+        # 添加页脚信息
         report.append("")
         report.append(f"Generated by IMA System | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
         return "\n".join(report)
     
     def save_results(self, data: Dict[str, Any], input_filename: str):
         """
         保存结果，自动分类：
         - JSON -> resource/meeting_summaries
-        - MD   -> resource/meeting_sum_md  <-- [修改]
+        - MD   -> resource/meeting_sum_md  <-- [修改] 新路径
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = os.path.basename(input_filename).replace('.txt', '')

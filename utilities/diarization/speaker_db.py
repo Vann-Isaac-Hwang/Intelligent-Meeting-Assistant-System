@@ -3,6 +3,7 @@ import numpy as np
 import os
 import datetime
 import io
+import gc
 
 # 尝试导入声纹提取模型 (SpeechBrain)
 try:
@@ -18,13 +19,13 @@ class SpeakerDB:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
-        self._load_model()
+        self.classifier = None
+        self._load_model() # 初始化时加载，保证 UI 响应快
 
     def _init_db(self):
-        """初始化 SQLite 数据库 (包含自动迁移逻辑)"""
+        """初始化 SQLite 数据库"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS speakers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,8 +35,7 @@ class SpeakerDB:
                 created_at TEXT
             )
         ''')
-        
-        # 自动迁移: 检查是否缺少 title 字段
+        # 自动迁移
         cursor.execute("PRAGMA table_info(speakers)")
         columns = [info[1] for info in cursor.fetchall()]
         if "title" not in columns:
@@ -44,15 +44,17 @@ class SpeakerDB:
                 conn.commit()
             except Exception as e:
                 print(f"[Error] Migration failed: {e}")
-
         conn.commit()
         conn.close()
 
     def _load_model(self):
         """加载声纹提取模型"""
-        self.classifier = None
+        if self.classifier is not None:
+            return # 避免重复加载
+
         if HAS_MODEL:
             try:
+                # print("[SpeakerDB] Loading model to GPU...")
                 self.classifier = EncoderClassifier.from_hparams(
                     source="speechbrain/spkrec-ecapa-voxceleb",
                     savedir="resource/models/spkrec-ecapa-voxceleb",
@@ -61,28 +63,38 @@ class SpeakerDB:
             except Exception as e:
                 print(f"Error loading speaker model: {e}")
 
-    # --- [核心修改] 支持从内存(Numpy Array)提取 ---
+    def unload_model(self):
+        """[新增] 卸载模型并释放显存"""
+        if self.classifier:
+            del self.classifier
+            self.classifier = None
+        
+        if HAS_MODEL:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        # print("[SpeakerDB] Model unloaded and GPU memory cleared.")
+
+    def _ensure_model(self):
+        """确保模型已加载（懒加载机制）"""
+        if self.classifier is None:
+            self._load_model()
+
     def extract_embedding_from_memory(self, audio_np):
-        """
-        从 Numpy 数组提取声纹。
-        audio_np: shape (N,) 采样率应为 16000
-        """
+        self._ensure_model() # 自动重载
         if not self.classifier:
             return np.random.rand(192).astype(np.float32)
         
-        # 转换为 Tensor: (batch=1, time)
         signal = torch.from_numpy(audio_np).float().unsqueeze(0)
-        
-        # 移至 GPU (如果模型在 GPU 上)
-        if self.classifier.mods.embedding_model.training: # 简单判断设备
-             pass # SpeechBrain 处理设备比较自动，通常不需要手动 move，除非明确指定
-        
-        # SpeechBrain 要求输入是 Tensor
+        # 如果模型在 GPU，确保输入也在 GPU (SpeechBrain通常自动处理，但显式转换更稳)
+        if torch.cuda.is_available():
+            signal = signal.to("cuda")
+            
         embedding = self.classifier.encode_batch(signal)
         return embedding.squeeze().cpu().numpy()
 
     def extract_embedding(self, audio_path):
-        """从文件提取 (兼容旧代码)"""
+        self._ensure_model()
         if not self.classifier:
             return np.random.rand(192).astype(np.float32)
         signal = self.classifier.load_audio(audio_path)
@@ -140,35 +152,27 @@ class SpeakerDB:
         conn.close()
         return data
 
-    # --- [核心修改] 返回 (name, title) ---
     def match_speaker(self, input_embedding, threshold=0.25):
-        """
-        匹配数据库声纹。
-        返回: (name, title) 或 ("Unknown", "")
-        """
+        # 匹配不需要加载模型，纯 CPU 计算
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        # [修改] 同时查询 name 和 title
         cursor.execute("SELECT name, title, embedding FROM speakers")
         rows = cursor.fetchall()
         conn.close()
 
         best_score = -1.0
-        best_info = ("Unknown", "") # name, title
+        best_info = ("Unknown", "")
 
         norm_input = np.linalg.norm(input_embedding)
         
         for name, title, blob in rows:
             target_emb = np.frombuffer(blob, dtype=np.float32)
             score = np.dot(input_embedding, target_emb) / (norm_input * np.linalg.norm(target_emb))
-            
             if score > best_score:
                 best_score = score
-                # 确保 title 不是 None
                 safe_title = title if title else ""
                 best_info = (name, safe_title)
         
         if best_score > threshold:
             return best_info
-        
         return ("Unknown", "")

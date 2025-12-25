@@ -15,7 +15,7 @@
         215
       ],
       "config": {
-        "enable": false
+        "enable": true
       }
     },
     {
@@ -31,8 +31,8 @@
     {
       "label": "Speaker ID",
       "pos": [
-        653,
-        145
+        652,
+        185
       ],
       "config": {
         "window": 1.5,
@@ -42,11 +42,13 @@
     {
       "label": "Whisper ASR",
       "pos": [
-        855,
-        132
+        835,
+        134
       ],
       "config": {
-        "model": "small"
+        "model": "small",
+        "full_text_correction": true,
+        "enhanced_audio": true
       }
     },
     {

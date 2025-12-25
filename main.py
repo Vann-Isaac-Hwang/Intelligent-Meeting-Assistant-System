@@ -63,7 +63,7 @@ def render_markdown(container_tag, markdown_text):
                 dpg.add_text(line, wrap=450, color=(200, 200, 200))
 
 # ==========================================
-# 3. 日志系统
+# 3. 日志系统 (保持不变)
 # ==========================================
 def log(msg, is_result=False):
     t = datetime.datetime.now().strftime("%H:%M:%S")
@@ -85,12 +85,18 @@ def log(msg, is_result=False):
                 dpg.add_text(f">>> {msg}", parent="TranscriptBox", color=(255, 255, 0))
 
 # ==========================================
-# 4. 节点工厂
+# 4. 节点工厂 & 状态管理
 # ==========================================
 def build_enhancer_ui(nid): dpg.add_checkbox(label="Enable", default_value=True, tag=f"chk_enhance_{nid}")
 def build_vad_ui(nid): dpg.add_slider_int(label="Aggressiveness", default_value=3, min_value=0, max_value=3, width=120, tag=f"vad_agg_{nid}")
 def build_spk_ui(nid): dpg.add_drag_float(label="Win(s)", default_value=1.5, width=60, tag=f"win_{nid}"); dpg.add_drag_float(label="Step(s)", default_value=0.75, width=60, tag=f"step_{nid}")
-def build_asr_ui(nid): dpg.add_combo(["tiny","small","base","medium"], default_value="small", width=100, tag=f"model_{nid}")
+
+# [修改] ASR UI: 增加 Enhanced Audio 选项
+def build_asr_ui(nid): 
+    dpg.add_combo(["tiny","small","base","medium"], default_value="small", width=100, tag=f"model_{nid}")
+    dpg.add_checkbox(label="Full Text Correction", default_value=False, tag=f"chk_ftc_{nid}")
+    dpg.add_checkbox(label="Enhanced Audio", default_value=False, tag=f"chk_enhance_audio_{nid}")
+
 def build_llm_ui(nid): dpg.add_checkbox(label="Gen Summary", default_value=True, tag=f"chk_llm_{nid}"); dpg.add_radio_button(["Local","Online"], default_value="Local", tag=f"back_{nid}")
 
 NODE_FACTORY = {
@@ -114,7 +120,11 @@ def get_current_state():
             if label == "Audio Enhancer": cfg['enable'] = dpg.get_value(f"chk_enhance_{nid}")
             elif label == "VAD Detector": cfg['aggressiveness'] = dpg.get_value(f"vad_agg_{nid}")
             elif label == "Speaker ID": cfg['window'] = dpg.get_value(f"win_{nid}"); cfg['step'] = dpg.get_value(f"step_{nid}")
-            elif label == "Whisper ASR": cfg['model'] = dpg.get_value(f"model_{nid}")
+            elif label == "Whisper ASR": 
+                cfg['model'] = dpg.get_value(f"model_{nid}")
+                cfg['full_text_correction'] = dpg.get_value(f"chk_ftc_{nid}")
+                # [新增] 保存 enhanced_audio 状态
+                cfg['enhanced_audio'] = dpg.get_value(f"chk_enhance_audio_{nid}")
             elif label == "LLM Summary": cfg['enable'] = dpg.get_value(f"chk_llm_{nid}"); cfg['backend'] = dpg.get_value(f"back_{nid}")
         except: pass
         state["nodes"].append({"label": label, "pos": pos, "config": cfg})
@@ -148,7 +158,11 @@ def load_state(state):
                     if label == "Audio Enhancer": dpg.set_value(f"chk_enhance_{nid}", cfg.get('enable', True))
                     elif label == "VAD Detector": dpg.set_value(f"vad_agg_{nid}", cfg.get('aggressiveness', 3))
                     elif label == "Speaker ID": dpg.set_value(f"win_{nid}", cfg.get('window', 1.5)); dpg.set_value(f"step_{nid}", cfg.get('step', 0.75))
-                    elif label == "Whisper ASR": dpg.set_value(f"model_{nid}", cfg.get('model', 'small'))
+                    elif label == "Whisper ASR": 
+                        dpg.set_value(f"model_{nid}", cfg.get('model', 'small'))
+                        dpg.set_value(f"chk_ftc_{nid}", cfg.get('full_text_correction', False))
+                        # [新增] 恢复 enhanced_audio 状态
+                        dpg.set_value(f"chk_enhance_audio_{nid}", cfg.get('enhanced_audio', False))
                     elif label == "LLM Summary": dpg.set_value(f"chk_llm_{nid}", cfg.get('enable', True)); dpg.set_value(f"back_{nid}", cfg.get('backend', 'Local'))
                 except: pass
         for l_data in state["links"]:
@@ -163,147 +177,80 @@ def load_state(state):
     except Exception as e: log(f"Load error: {e}")
 
 # ==========================================
-# 5. 声纹管理逻辑 (新增职位)
+# 5. 声纹管理逻辑
 # ==========================================
 def refresh_speaker_list():
-    # 数据格式: [(name, title, date), ...]
     speakers = speaker_db.get_all_speakers()
     items = []
     for s in speakers:
-        name = s[0]
-        title = s[1] if s[1] else "No Title" # 处理空值
-        date = s[2][:10] if s[2] else "?"
-        # [显示格式] "Name (Job Title) | Date"
+        name = s[0]; title = s[1] if s[1] else "No Title"; date = s[2][:10] if s[2] else "?"
         items.append(f"{name} ({title})  |  {date}")
-    
     dpg.configure_item("SpeakerList", items=items)
 
 def get_selected_speaker_name():
     selection = dpg.get_value("SpeakerList")
     if not selection: return None
-    # "Name (Title)  |  Date" -> 提取 Name
-    # 逻辑：取第一个 " (" 之前的内容
-    part1 = selection.split("  |  ")[0] # Name (Title)
-    if " (" in part1:
-        return part1.split(" (")[0]
+    part1 = selection.split("  |  ")[0]
+    if " (" in part1: return part1.split(" (")[0]
     return part1
 
 def spk_btn_add_file():
     name = dpg.get_value("SpeakerNameInput").strip()
-    title = dpg.get_value("SpeakerTitleInput").strip() # [新增]
-    
-    if not name:
-        log("⚠️ Error: Please enter a NAME first!", is_result=False)
-        return
-
+    title = dpg.get_value("SpeakerTitleInput").strip()
+    if not name: log("⚠️ Error: Please enter a NAME first!", is_result=False); return
     try:
         root = tk.Tk(); root.withdraw(); root.attributes('-topmost',True)
         p = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.m4a")])
         root.destroy()
-        
         if p:
             log(f"Extracting voiceprint from: {os.path.basename(p)}")
-            # [修改] 传入 title
             success, msg = speaker_db.add_speaker(name, title, p)
             if success:
-                log(f"✅ Speaker '{name}' ({title}) added!")
-                refresh_speaker_list()
-                dpg.set_value("SpeakerNameInput", "") 
-                dpg.set_value("SpeakerTitleInput", "") 
-            else:
-                log(f"❌ Failed: {msg}")
-    except Exception as e:
-        log(f"Error dialog: {e}")
+                log(f"✅ Speaker '{name}' ({title}) added!"); refresh_speaker_list()
+                dpg.set_value("SpeakerNameInput", ""); dpg.set_value("SpeakerTitleInput", "") 
+            else: log(f"❌ Failed: {msg}")
+    except Exception as e: log(f"Error dialog: {e}")
 
 def spk_btn_record_add(s):
     name = dpg.get_value("SpeakerNameInput").strip()
-    title = dpg.get_value("SpeakerTitleInput").strip() # [新增]
-    
-    current_label = dpg.get_item_label(s)
-    
-    if "Start" in current_label:
-        if not name:
-            log("⚠️ Error: Enter NAME before recording!")
-            return
-
-        dpg.set_item_label(s, "Stop & Save")
-        dpg.bind_item_theme(s, "theme_red")
-        
+    title = dpg.get_value("SpeakerTitleInput").strip()
+    if "Start" in dpg.get_item_label(s):
+        if not name: log("⚠️ Error: Enter NAME before recording!"); return
+        dpg.set_item_label(s, "Stop & Save"); dpg.bind_item_theme(s, "theme_red")
         f_name = f"voiceprint_{int(time.time())}"
         executor.recorder.start(f_name)
-        
-        full_path = os.path.join("resource", "raw", f_name + ".wav")
-        dpg.set_item_user_data(s, full_path)
-        
+        dpg.set_item_user_data(s, os.path.join("resource", "raw", f_name + ".wav"))
         log(f"🎙️ Recording '{name}'... Click Stop to save.")
-        
     else:
-        dpg.set_item_label(s, "Start Recording")
-        dpg.bind_item_theme(s, "theme_green")
-        
-        executor.recorder.stop()
-        log("Processing voiceprint...")
-        
-        full_path = dpg.get_item_user_data(s)
+        dpg.set_item_label(s, "Start Recording"); dpg.bind_item_theme(s, "theme_green")
+        executor.recorder.stop(); log("Processing voiceprint...")
         time.sleep(0.5) 
-        
+        full_path = dpg.get_item_user_data(s)
         if full_path and os.path.exists(full_path):
-            # [修改] 传入 title
             success, msg = speaker_db.add_speaker(name, title, full_path)
             if success:
-                log(f"✅ Speaker '{name}' added!")
-                refresh_speaker_list()
-                dpg.set_value("SpeakerNameInput", "")
-                dpg.set_value("SpeakerTitleInput", "")
-            else:
-                log(f"❌ Failed: {msg}")
-        else:
-            log("Error: Recording not found.")
+                log(f"✅ Speaker '{name}' added!"); refresh_speaker_list()
+                dpg.set_value("SpeakerNameInput", ""); dpg.set_value("SpeakerTitleInput", "")
+            else: log(f"❌ Failed: {msg}")
+        else: log("Error: Recording not found.")
 
 def spk_btn_delete():
     name = get_selected_speaker_name()
     if not name: return
     speaker_db.delete_speaker(name)
-    log(f"Speaker '{name}' deleted.")
-    refresh_speaker_list()
+    log(f"Speaker '{name}' deleted."); refresh_speaker_list()
 
-def spk_btn_update():
-    # 1. 获取当前选中的人 (旧名字)
+def spk_btn_rename():
     old_name = get_selected_speaker_name()
-    if not old_name: 
-        log("⚠️ Please select a speaker from the list first.")
-        return
-
-    # 2. 获取输入框的内容
     new_name = dpg.get_value("SpeakerNameInput").strip()
     new_title = dpg.get_value("SpeakerTitleInput").strip()
-    
-    # 3. 校验
-    if not new_name and not new_title:
-        log("⚠️ Please enter a new Name OR a new Title to update.")
-        return
-    
-    # 4. 调用数据库更新
-    # 注意：如果输入框是空的，传给数据库 None
-    success, msg = speaker_db.update_speaker_info(
-        current_name=old_name, 
-        new_name=new_name if new_name else None, 
-        new_title=new_title if new_title else None
-    )
-    
+    if not old_name: log("⚠️ Please select a speaker first."); return
+    if not new_name and not new_title: log("⚠️ Enter Name/Title to update."); return
+    success, msg = speaker_db.update_speaker_info(current_name=old_name, new_name=new_name if new_name else None, new_title=new_title if new_title else None)
     if success:
-        log_msg = f"Updated '{old_name}': "
-        if new_name: log_msg += f"Name->{new_name} "
-        if new_title: log_msg += f"Title->{new_title}"
-        
-        log(f"✅ {log_msg}")
-        refresh_speaker_list()
-        
-        # 清空输入框，方便下一次操作
-        dpg.set_value("SpeakerNameInput", "")
-        dpg.set_value("SpeakerTitleInput", "")
-    else:
-        log(f"❌ Update failed: {msg}")
+        log(f"✅ Updated '{old_name}'."); refresh_speaker_list()
+        dpg.set_value("SpeakerNameInput", ""); dpg.set_value("SpeakerTitleInput", "")
+    else: log(f"❌ Update failed: {msg}")
 
 # ==========================================
 # 6. 回调 & 线程
@@ -351,7 +298,11 @@ def start_processing_thread(path, mode):
             elif lbl == "VAD Detector": cfg['aggressiveness'] = dpg.get_value(f"vad_agg_{nid}")
             elif lbl == "Speaker ID": 
                 cfg['window'] = dpg.get_value(f"win_{nid}"); cfg['step'] = dpg.get_value(f"step_{nid}")
-            elif lbl == "Whisper ASR": cfg['model'] = dpg.get_value(f"model_{nid}")
+            elif lbl == "Whisper ASR": 
+                cfg['model'] = dpg.get_value(f"model_{nid}")
+                cfg['full_text_correction'] = dpg.get_value(f"chk_ftc_{nid}")
+                # [新增] 传递增强开关
+                cfg['enhanced_audio'] = dpg.get_value(f"chk_enhance_audio_{nid}")
             elif lbl == "LLM Summary": 
                 cfg['enable'] = dpg.get_value(f"chk_llm_{nid}"); cfg['backend'] = dpg.get_value(f"back_{nid}")
         except: pass
@@ -409,7 +360,6 @@ def build_gui():
 
     with dpg.window(tag="Primary Window"):
         with dpg.tab_bar():
-            # Tab 1: Dashboard
             with dpg.tab(label="  Dashboard  "):
                 dpg.add_spacer(height=15)
                 with dpg.group(horizontal=True):
@@ -443,27 +393,21 @@ def build_gui():
                                 with dpg.child_window(tag="SummaryWindow", border=False):
                                     dpg.add_group(tag="SummaryContainer")
             
-            # Tab 2: Speaker Manager
             with dpg.tab(label="  Speaker Manager  "):
                 dpg.add_spacer(height=10)
                 with dpg.group(horizontal=True):
                     with dpg.child_window(width=400):
                         dpg.add_text("Registered Speakers", color=(100,255,100))
                         dpg.add_listbox(tag="SpeakerList", width=-1, num_items=20)
-                    
                     with dpg.child_window(width=-1):
                         dpg.add_text("Manage Speaker")
                         dpg.add_separator()
                         dpg.add_spacer(height=10)
-                        
                         dpg.add_text("Name:")
-                        dpg.add_input_text(tag="SpeakerNameInput", width=300, hint="e.g. Alice")
+                        dpg.add_input_text(tag="SpeakerNameInput", width=300, hint="Enter name here (Required)...")
                         dpg.add_spacer(height=5)
-                        
-                        # [新增] 职位输入框
                         dpg.add_text("Job Title / Position:")
                         dpg.add_input_text(tag="SpeakerTitleInput", width=300, hint="e.g. Project Manager")
-                        
                         dpg.add_spacer(height=20)
                         dpg.add_text("Add New Voiceprint:")
                         with dpg.group(horizontal=True):
@@ -471,20 +415,15 @@ def build_gui():
                             dpg.bind_item_theme("btn_spk_rec", "theme_green")
                             dpg.add_spacer(width=20)
                             dpg.add_button(label="Import File", width=140, height=40, callback=spk_btn_add_file)
-                        
                         dpg.add_spacer(height=40)
                         dpg.add_separator()
                         dpg.add_spacer(height=10)
-                        
                         dpg.add_text("Actions on Selected:")
                         with dpg.group(horizontal=True):
-                            # [修改] 按钮文字改为 Update Info，回调改为 spk_btn_update
-                            dpg.add_button(label="Update Info", width=100, callback=spk_btn_update)
-                            
+                            dpg.add_button(label="Update Info", width=100, callback=spk_btn_rename)
                             dpg.add_spacer(width=20)
                             dpg.add_button(label="Delete", width=100, callback=spk_btn_delete)
                             dpg.bind_item_theme(dpg.last_item(), "theme_red")
-
                 refresh_speaker_list()
 
             with dpg.tab(label="  Pipeline Designer  "):
@@ -504,7 +443,6 @@ def build_gui():
                     if not loaded:
                          for name, data in NODE_FACTORY.items():
                              create_node(name, [100,100], data["ins"], data["outs"], data["ui"])
-                         # Auto link (simplified)
                          ids = dpg.get_item_children(TAG_NODE_EDITOR, 1) or []
                          lbl_map = {dpg.get_item_label(i): i for i in ids}
                          link_list = [("Audio Source",0,"Audio Enhancer",0), ("Audio Enhancer",0,"VAD Detector",0), ("VAD Detector",0,"Speaker ID",0), ("VAD Detector",0,"Whisper ASR",0), ("Speaker ID",0,"Whisper ASR",1), ("Whisper ASR",0,"LLM Summary",0)]
@@ -515,7 +453,7 @@ def build_gui():
                                  ins = [c for c in dpg.get_item_children(n2,1) if dpg.get_item_configuration(c)['attribute_type']==dpg.mvNode_Attr_Input]
                                  if len(outs)>si and len(ins)>di: link_cb(TAG_NODE_EDITOR, (outs[si], ins[di]))
 
-    dpg.create_viewport(title="IMA System v19.0 (Job Titles)", width=1280, height=800)
+    dpg.create_viewport(title="IMA System v20.1 (Enhanced Audio)", width=1280, height=800)
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("Primary Window", True)
